@@ -78,22 +78,24 @@ MVKSemaphoreImpl::~MVKSemaphoreImpl() {
 
 
 #pragma mark -
-#pragma mark MVKSemaphoreMTLEvent
+#pragma mark MVKSemaphoreMTLFence
 
 // Could use any encoder. Assume BLIT is fastest and lightest.
 // Nil mtlCmdBuff will do nothing.
-void MVKSemaphoreMTLFence::encodeWait(id<MTLCommandBuffer> mtlCmdBuff) {
+VkResult MVKSemaphoreMTLFence::encodeWait(id<MTLCommandBuffer> mtlCmdBuff) {
 	id<MTLBlitCommandEncoder> mtlCmdEnc = mtlCmdBuff.blitCommandEncoder;
 	[mtlCmdEnc waitForFence: _mtlFence];
 	[mtlCmdEnc endEncoding];
+	return VK_SUCCESS;
 }
 
 // Could use any encoder. Assume BLIT is fastest and lightest.
 // Nil mtlCmdBuff will do nothing.
-void MVKSemaphoreMTLFence::encodeSignal(id<MTLCommandBuffer> mtlCmdBuff) {
+VkResult MVKSemaphoreMTLFence::encodeSignal(id<MTLCommandBuffer> mtlCmdBuff) {
 	id<MTLBlitCommandEncoder> mtlCmdEnc = mtlCmdBuff.blitCommandEncoder;
 	[mtlCmdEnc updateFence: _mtlFence];
 	[mtlCmdEnc endEncoding];
+	return VK_SUCCESS;
 }
 
 MVKSemaphoreMTLFence::MVKSemaphoreMTLFence(MVKDevice* device, const VkSemaphoreCreateInfo* pCreateInfo) :
@@ -109,19 +111,70 @@ MVKSemaphoreMTLFence::~MVKSemaphoreMTLFence() {
 #pragma mark MVKSemaphoreMTLEvent
 
 // Nil mtlCmdBuff will do nothing.
-void MVKSemaphoreMTLEvent::encodeWait(id<MTLCommandBuffer> mtlCmdBuff) {
-	[mtlCmdBuff encodeWaitForEvent: _mtlEvent value: _mtlEventValue++];
+VkResult MVKSemaphoreMTLEvent::encodeWait(id<MTLCommandBuffer> mtlCmdBuff) {
+	if (mtlCmdBuff)
+	{
+		// check there is only one signal ahead
+		if (_mtlSignalEventValue != _mtlWaitEventValue + 1) return reportError(VK_ERROR_DEVICE_LOST, "VkSemaphore must be signaled or have a pending signal operation before queueing a wait operation");
+
+		[mtlCmdBuff encodeWaitForEvent: _mtlEvent value: _mtlWaitEventValue++];
+	}
+	return VK_SUCCESS;
 }
 
 // Nil mtlCmdBuff will do nothing.
-void MVKSemaphoreMTLEvent::encodeSignal(id<MTLCommandBuffer> mtlCmdBuff) {
-	[mtlCmdBuff encodeSignalEvent: _mtlEvent value: _mtlEventValue];
+VkResult MVKSemaphoreMTLEvent::encodeSignal(id<MTLCommandBuffer> mtlCmdBuff) {
+	if (mtlCmdBuff)
+	{
+		// check there hasn't been wait without signal
+		if (_mtlSignalEventValue != _mtlWaitEventValue) return reportError(VK_ERROR_DEVICE_LOST, "VkSemaphore must be unsignaled or have a pending wait operation before queueing a signal operation");
+
+		[mtlCmdBuff encodeSignalEvent: _mtlEvent value: _mtlSignalEventValue++];
+	}
+	return VK_SUCCESS;
+}
+
+VkResult MVKSemaphoreMTLEvent::signalFromCPU() {
+	// check there hasn't been wait without signal
+	if (_mtlSignalEventValue != _mtlWaitEventValue) return reportError(VK_ERROR_DEVICE_LOST, "VkSemaphore must be unsignaled or have a pending wait operation before queueing a signal operation");
+
+	// check that there is no pending signals previously submited but that haven't yet happened
+	// vulkan requires that a semaphore can only be re-signaled when it can be proven
+	// that both the previously submited signals and waits have completed by the point the new signal is executed
+	// ie, signal and wait operations have to happen on the same order they are submited
+	if (_mtlSignalEventValue - 1 != _mtlEvent.signaledValue) return reportError(VK_ERROR_DEVICE_LOST, "VkSemaphore signal operations must happen in the same order as they are queued (expected %u, got %u)", _mtlSignalEventValue - 1, (uint32_t)_mtlEvent.signaledValue);
+
+	_mtlEvent.signaledValue = _mtlSignalEventValue++;
+
+	return VK_SUCCESS;
+}
+
+VkResult MVKSemaphoreMTLEvent::delayedSignalFromCPU(uint32_t& outSignalValue) {
+	// check there hasn't been wait without signal
+	if (_mtlSignalEventValue != _mtlWaitEventValue) return reportError(VK_ERROR_DEVICE_LOST, "VkSemaphore must be unsignaled or have a pending wait operation before queueing a signal operation");
+
+	outSignalValue = _mtlSignalEventValue++;
+
+	return VK_SUCCESS;
+}
+
+VkResult MVKSemaphoreMTLEvent::commitDelayedSignalFromCPU(uint32_t signalValue) {
+	// check that there is no pending signals previously submited but that haven't yet happened
+	// vulkan requires that a semaphore can only be re-signaled when it can be proven
+	// that both the previously submited signals and waits have completed by the point the new signal is executed
+	// ie, signal and wait operations have to happen on the same order they are submited
+	if (signalValue - 1 != _mtlEvent.signaledValue) return reportError(VK_ERROR_DEVICE_LOST, "VkSemaphore signal operations must happen in the same order as they are queued (expected %u, got %u)", signalValue - 1, (uint32_t)_mtlEvent.signaledValue);
+
+	_mtlEvent.signaledValue = signalValue;
+
+	return VK_SUCCESS;
 }
 
 MVKSemaphoreMTLEvent::MVKSemaphoreMTLEvent(MVKDevice* device, const VkSemaphoreCreateInfo* pCreateInfo) :
 	MVKSemaphore(device, pCreateInfo),
-	_mtlEvent([device->getMTLDevice() newEvent]),	//retained
-	_mtlEventValue(1) {}
+	_mtlEvent([device->getMTLDevice() newSharedEvent]),	//retained
+	_mtlWaitEventValue(1),
+	_mtlSignalEventValue(1) {}
 
 MVKSemaphoreMTLEvent::~MVKSemaphoreMTLEvent() {
     [_mtlEvent release];
@@ -131,12 +184,14 @@ MVKSemaphoreMTLEvent::~MVKSemaphoreMTLEvent() {
 #pragma mark -
 #pragma mark MVKSemaphoreEmulated
 
-void MVKSemaphoreEmulated::encodeWait(id<MTLCommandBuffer> mtlCmdBuff) {
+VkResult MVKSemaphoreEmulated::encodeWait(id<MTLCommandBuffer> mtlCmdBuff) {
 	if ( !mtlCmdBuff ) { _blocker.wait(UINT64_MAX, true); }
+	return VK_SUCCESS;
 }
 
-void MVKSemaphoreEmulated::encodeSignal(id<MTLCommandBuffer> mtlCmdBuff) {
+VkResult MVKSemaphoreEmulated::encodeSignal(id<MTLCommandBuffer> mtlCmdBuff) {
 	if ( !mtlCmdBuff ) { _blocker.release(); }
+	return VK_SUCCESS;
 }
 
 MVKSemaphoreEmulated::MVKSemaphoreEmulated(MVKDevice* device, const VkSemaphoreCreateInfo* pCreateInfo) :

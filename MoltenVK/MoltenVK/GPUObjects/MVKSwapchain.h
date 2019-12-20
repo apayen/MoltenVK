@@ -30,7 +30,12 @@ class MVKWatermark;
 #pragma mark MVKSwapchain
 
 /** Tracks a semaphore and fence for later signaling. */
-typedef std::pair<MVKSemaphore*, MVKFence*> MVKSwapchainSignaler;
+struct MVKSwapchainSignaler
+{
+	MVKFence* _fence;
+	MVKSemaphore* _semaphore;
+	uint32_t _semaphoreSignalValue;
+};
 
 /** Represents a Vulkan swapchain. */
 class MVKSwapchain : public MVKVulkanAPIDeviceObject {
@@ -116,7 +121,6 @@ protected:
 	struct Availability {
 		MVKSwapchainImageAvailability status;
 		MVKVectorInline<MVKSwapchainSignaler, 1> signalers;
-		MVKSwapchainSignaler preSignaled;
 	};
 
 	void propogateDebugName() override;
@@ -129,8 +133,6 @@ protected:
     void renderWatermark(id<MTLTexture> mtlTexture, id<MTLCommandBuffer> mtlCmdBuff);
     void markFrameInterval();
 	void resetCAMetalDrawable(uint32_t imgIdx);
-	void signal(MVKSwapchainSignaler& signaler, id<MTLCommandBuffer> mtlCmdBuff);
-	void signalPresentationSemaphore(uint32_t imgIdx, id<MTLCommandBuffer> mtlCmdBuff);
 	static void markAsTracked(MVKSwapchainSignaler& signaler);
 	static void unmarkAsTracked(MVKSwapchainSignaler& signaler);
 	void makeAvailable(uint32_t imgIdx);

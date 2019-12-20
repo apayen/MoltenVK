@@ -1318,7 +1318,6 @@ void MVKSwapchainImage::presentCAMetalDrawable(id<MTLCommandBuffer> mtlCmdBuff) 
 	if (scName) { mvkPopDebugGroup(mtlCmdBuff); }
 
 	resetMetalSurface();
-	_swapchain->signalPresentationSemaphore(_swapchainIndex, mtlCmdBuff);
 
 	retain();	// Ensure this image is not destroyed while awaiting MTLCommandBuffer completion
 	[mtlCmdBuff addCompletedHandler: ^(id<MTLCommandBuffer> mcb) {

@@ -133,7 +133,7 @@ public:
 	 * subclass supports command encoding, and once without a mtlCmdBuff, at the point in the
 	 * code path where the code should block if the subclass does not support command encoding.
 	 */
-	virtual void encodeWait(id<MTLCommandBuffer> mtlCmdBuff) = 0;
+	virtual VkResult encodeWait(id<MTLCommandBuffer> mtlCmdBuff) = 0;
 
 	/**
 	 * Signals this semaphore.
@@ -148,7 +148,13 @@ public:
 	 * subclass supports command encoding, and once without a mtlCmdBuff, at the point in the
 	 * code path where the code should block if the subclass does not support command encoding.
 	 */
-	virtual void encodeSignal(id<MTLCommandBuffer> mtlCmdBuff) = 0;
+	virtual VkResult encodeSignal(id<MTLCommandBuffer> mtlCmdBuff) = 0;
+
+	virtual VkResult signalFromCPU() { return VK_ERROR_FEATURE_NOT_PRESENT; }
+
+	virtual VkResult delayedSignalFromCPU(uint32_t& outSignalValue) { return VK_ERROR_FEATURE_NOT_PRESENT; }
+
+	virtual VkResult commitDelayedSignalFromCPU(uint32_t signalValue) { return VK_ERROR_FEATURE_NOT_PRESENT; }
 
 	/** Returns whether this semaphore uses command encoding. */
 	virtual bool isUsingCommandEncoding() = 0;
@@ -171,8 +177,8 @@ protected:
 class MVKSemaphoreMTLFence : public MVKSemaphore {
 
 public:
-	void encodeWait(id<MTLCommandBuffer> mtlCmdBuff) override;
-	void encodeSignal(id<MTLCommandBuffer> mtlCmdBuff) override;
+	VkResult encodeWait(id<MTLCommandBuffer> mtlCmdBuff) override;
+	VkResult encodeSignal(id<MTLCommandBuffer> mtlCmdBuff) override;
 	bool isUsingCommandEncoding() override { return true; }
 
 	MVKSemaphoreMTLFence(MVKDevice* device, const VkSemaphoreCreateInfo* pCreateInfo);
@@ -191,8 +197,11 @@ protected:
 class MVKSemaphoreMTLEvent : public MVKSemaphore {
 
 public:
-	void encodeWait(id<MTLCommandBuffer> mtlCmdBuff) override;
-	void encodeSignal(id<MTLCommandBuffer> mtlCmdBuff) override;
+	VkResult encodeWait(id<MTLCommandBuffer> mtlCmdBuff) override;
+	VkResult encodeSignal(id<MTLCommandBuffer> mtlCmdBuff) override;
+	VkResult signalFromCPU() override;
+	VkResult delayedSignalFromCPU(uint32_t& outSignalValue) override;
+	VkResult commitDelayedSignalFromCPU(uint32_t signalValue) override;
 	bool isUsingCommandEncoding() override { return true; }
 
 	MVKSemaphoreMTLEvent(MVKDevice* device, const VkSemaphoreCreateInfo* pCreateInfo);
@@ -200,8 +209,13 @@ public:
 	~MVKSemaphoreMTLEvent() override;
 
 protected:
-	id<MTLEvent> _mtlEvent;
-	std::atomic<uint64_t> _mtlEventValue;
+	id<MTLSharedEvent> _mtlEvent;
+
+	// Vulkan requires a wait operation on a queue to have a signal operation already submited on any queue.
+	// It means that the application must queue signal, then queue wait, then queue signal, then queue wait
+	// It is not legal to queue multiple signals and/or waits simultaneously, thus use of atomics here are not required.
+	uint32_t _mtlSignalEventValue;
+	uint32_t _mtlWaitEventValue;
 };
 
 
@@ -212,8 +226,8 @@ protected:
 class MVKSemaphoreEmulated : public MVKSemaphore {
 
 public:
-	void encodeWait(id<MTLCommandBuffer> mtlCmdBuff) override;
-	void encodeSignal(id<MTLCommandBuffer> mtlCmdBuff) override;
+	VkResult encodeWait(id<MTLCommandBuffer> mtlCmdBuff) override;
+	VkResult encodeSignal(id<MTLCommandBuffer> mtlCmdBuff) override;
 	bool isUsingCommandEncoding() override { return false; }
 
 	MVKSemaphoreEmulated(MVKDevice* device, const VkSemaphoreCreateInfo* pCreateInfo);
